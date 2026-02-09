@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="no">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Energibrønnkalkulator – Brønnpark</title>
+
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121a33;
+      --text: #e7ecff;
+      --muted: #a9b4e6;
+      --accent: #7aa2ff;
+      --danger: #ff6b6b;
+      --border: rgba(255,255,255,.12);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      background: radial-gradient(1000px 600px at 20% 0%, #18214a, var(--bg));
+      color: var(--text);
+    }
+
+    .topbar {
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(10, 14, 30, 0.7);
+      backdrop-filter: blur(8px);
+    }
+
+    .title h1 { margin: 0; font-size: 18px; }
+    .title p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+
+    .controls {
+      display: flex;
+      gap: 10px;
+      align-items: end;
+      flex-wrap: wrap;
+    }
+
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    input, select {
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      outline: none;
+      min-width: 150px;
+    }
+    button, .filebtn {
+      padding: 9px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 600;
+    }
+    button:hover, .filebtn:hover { border-color: rgba(255,255,255,.25); }
+    button.danger { border-color: rgba(255,107,107,.5); }
+    button.danger:hover { border-color: var(--danger); }
+
+    .workspace { padding: 14px; display: grid; gap: 10px; }
+    .hint { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+    #canvas {
+      width: 100%;
+      max-width: 1200px;
+      border-radius: 16px;
+      border: 1px solid var(--border);
+      background: rgba(8, 10, 20, 0.55);
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="title">
+      <h1>Brønnpark-tegner</h1>
+      <p>Tegn inn brønner med nøyaktig avstand</p>
+    </div>
+
+    <div class="controls">
+      <label>
+        Gridavstand (m)
+        <input id="spacing" type="number" min="1" step="0.5" value="15" />
+      </label>
+
+      <label>
+        Layout
+        <select id="mode">
+          <option value="grid" selected>Grid (nøyaktig)</option>
+          <option value="snap">Fri + snap til avstand</option>
+        </select>
+      </label>
+
+      <label>
+        Skala (px per meter)
+        <input id="scale" type="number" min="2" step="1" value="10" />
+      </label>
+
+      <label>
+        X (m)
+        <input id="xCoord" type="number" step="0.1" placeholder="f.eks. 30" />
+      </label>
+
+      <label>
+        Y (m)
+        <input id="yCoord" type="number" step="0.1" placeholder="f.eks. -15" />
+      </label>
+
+      <button id="addCoord">Legg til (x,y)</button>
+
+
+      <button id="undo">Angre</button>
+      <button id="clear" class="danger">Slett alt</button>
+
+      <button id="export">Eksporter JSON</button>
+      <label class="filebtn">
+        Importer JSON
+        <input id="import" type="file" accept="application/json" hidden />
+      </label>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div class="hint">
+      <div><b>Bruk:</b> Klikk for å plassere brønn. Hjul = zoom. Hold <b>Space</b> + dra for å panorere.</div>
+      <div id="status"></div>
+    </div>
+    <canvas id="canvas" width="1200" height="700"></canvas>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+
+    const spacingEl = document.getElementById("spacing");
+    const scaleEl = document.getElementById("scale");
+    const modeEl = document.getElementById("mode");
+    const statusEl = document.getElementById("status");
+
+    const undoBtn = document.getElementById("undo");
+    const clearBtn = document.getElementById("clear");
+    const exportBtn = document.getElementById("export");
+    const importInput = document.getElementById("import");
+
+    const xCoordEl = document.getElementById("xCoord");
+    const yCoordEl = document.getElementById("yCoord");
+    const addCoordBtn = document.getElementById("addCoord");
+
+
+    let pxPerMeter = Number(scaleEl.value);
+    let offset = { x: 80, y: 80 }; // screen pixels
+    let wells = []; // {x,y} in meters
+    let mouseWorld = null;   // hvor musa er i world (meter)
+    let showTrail = true;    // kan skrus av/på senere
+    let showPreview = true;  // ESC toggler denne
+
+
+
+    let isPanning = false;
+    let panStart = { x: 0, y: 0 };
+    let offsetStart = { x: 0, y: 0 };
+    let spaceDown = false;
+
+    function worldToScreen(p) {
+        return {
+            x: p.x * pxPerMeter + offset.x,
+            y: offset.y - p.y * pxPerMeter   // <-- flip Y
+        };
+    }
+
+    function screenToWorld(p) {
+        return {
+            x: (p.x - offset.x) / pxPerMeter,
+            y: (offset.y - p.y) / pxPerMeter // <-- flip Y
+        };
+    }
+
+    function roundTo(value, step) {
+      return Math.round(value / step) * step;
+    }
+    function getMousePos(evt) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+        y: (evt.clientY - rect.top) * (canvas.height / rect.height)
+      };
+    }
+    function snapPoint(world, spacing) {
+      return { x: roundTo(world.x, spacing), y: roundTo(world.y, spacing) };
+    }
+
+    function drawGrid(spacing) {
+      const stepPx = spacing * pxPerMeter;
+      if (stepPx < 10) return;
+
+      const topLeft = screenToWorld({ x: 0, y: 0 });
+      const bottomRight = screenToWorld({ x: canvas.width, y: canvas.height });
+
+      const xMin = Math.min(topLeft.x, bottomRight.x);
+      const xMax = Math.max(topLeft.x, bottomRight.x);
+      const yMin = Math.min(topLeft.y, bottomRight.y);
+      const yMax = Math.max(topLeft.y, bottomRight.y);
+
+      const startX = Math.floor(xMin / spacing) * spacing;
+      const endX   = Math.ceil (xMax / spacing) * spacing;
+      const startY = Math.floor(yMin / spacing) * spacing;
+      const endY   = Math.ceil (yMax / spacing) * spacing;
+
+
+      ctx.save();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      ctx.beginPath();
+
+      for (let x = startX; x <= endX; x += spacing) {
+        const sx = worldToScreen({ x, y: 0 }).x;
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx, canvas.height);
+      }
+      for (let y = startY; y <= endY; y += spacing) {
+        const sy = worldToScreen({ x: 0, y }).y;
+        ctx.moveTo(0, sy);
+        ctx.lineTo(canvas.width, sy);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawAxes() {
+      const o = worldToScreen({ x: 0, y: 0 });
+      ctx.save();
+      ctx.strokeStyle = "rgba(122,162,255,0.35)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, o.y);
+      ctx.lineTo(canvas.width, o.y);
+      ctx.moveTo(o.x, 0);
+      ctx.lineTo(o.x, canvas.height);
+      ctx.stroke();
+
+      ctx.fillStyle = "rgba(122,162,255,0.9)";
+      ctx.font = "12px system-ui";
+      ctx.fillText("0,0", o.x + 6, o.y - 6);
+      ctx.restore();
+    }
+
+    function drawWells() {
+      ctx.save();
+      ctx.font = "12px system-ui";
+      for (let i = 0; i < wells.length; i++) {
+        const p = worldToScreen(wells[i]);
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(231,236,255,0.95)";
+        ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "rgba(169,180,230,0.9)";
+        ctx.fillText(`#${i + 1} (${wells[i].x.toFixed(1)}, ${wells[i].y.toFixed(1)}) m`, p.x + 10, p.y - 10);
+      }
+      ctx.restore();
+    }
+
+    function dist(a, b) {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return Math.sqrt(dx*dx + dy*dy);
+    }
+
+    function avgAllPairDistances(points) {
+        const n = points.length;
+        if (n < 2) return null;
+
+        let sum = 0;
+        let count = 0;
+
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+            sum += dist(points[i], points[j]);
+            count++;
+            }
+        }
+        return sum / count; // meter
+    }
+
+    function avgNearestNeighborDistance(points) {
+        const n = points.length;
+        if (n < 2) return null;
+
+        let sumNearest = 0;
+
+        for (let i = 0; i < n; i++) {
+            let best = Infinity;
+            for (let j = 0; j < n; j++) {
+                if (i === j) continue;
+                const d = dist(points[i], points[j]);
+                if (d < best) best = d;
+            }
+            sumNearest += best;
+        }
+        return sumNearest / n; // meter
+    }
+
+
+    function drawPreviewAndTrail() {
+        if (!mouseWorld) return;
+        if (!showPreview) return;
+
+        // preview-punkt (der musa er)
+        const p = worldToScreen(mouseWorld);
+
+        ctx.save();
+
+        // preview sirkel
+        ctx.beginPath();
+        ctx.strokeStyle = "rgba(231,236,255,0.7)";
+        ctx.lineWidth = 2;
+        ctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // trail fra siste brønn til preview + avstand
+        if (showTrail && wells.length > 0) {
+            const last = wells[wells.length - 1];
+            const lastS = worldToScreen(last);
+
+            // linje
+            ctx.beginPath();
+            ctx.strokeStyle = "rgba(122,162,255,0.6)";
+            ctx.setLineDash([6, 6]);
+            ctx.moveTo(lastS.x, lastS.y);
+            ctx.lineTo(p.x, p.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // avstandstekst ved midten
+            const d = dist(last, mouseWorld);
+            const mid = { x: (lastS.x + p.x) / 2, y: (lastS.y + p.y) / 2 };
+
+            ctx.fillStyle = "rgba(231,236,255,0.95)";
+            ctx.font = "12px system-ui";
+            ctx.fillText(`${d.toFixed(2)} m`, mid.x + 8, mid.y - 8);
+        }
+
+        ctx.restore();
+    }
+    
+    function addWellFromInputs() {
+        const x = Number(xCoordEl.value);
+        const y = Number(yCoordEl.value);
+
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            alert("Skriv inn gyldige tall for X og Y (meter).");
+            return;
+        }
+
+        wells.push({ x, y });
+
+        // gjør det litt “smooth”: slå på preview igjen og sett muse-preview til dette punktet
+        showPreview = true;
+        mouseWorld = { x, y };
+
+        // rydd feltene (valgfritt)
+        xCoordEl.value = "";
+        yCoordEl.value = "";
+
+        draw();
+    }
+
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const spacing = Number(spacingEl.value);
+      drawGrid(spacing);
+      drawAxes();
+      drawWells();
+      drawPreviewAndTrail();
+
+        const avgPairs = avgAllPairDistances(wells);
+        const avgNN = avgNearestNeighborDistance(wells);
+
+        const avgPairsTxt = avgPairs === null ? "-" : `${avgPairs.toFixed(2)} m`;
+        const avgNNTxt = avgNN === null ? "-" : `${avgNN.toFixed(2)} m`;
+
+        statusEl.textContent =
+        `Brønner: ${wells.length} | Gridavstand: ${spacing} m | ` +
+        `Snitt (alle par): ${avgPairsTxt} | Snitt (nærmeste nabo): ${avgNNTxt} | ` +
+        `Skala: ${pxPerMeter.toFixed(2)} px/m | Modus: ${modeEl.value}`;
+
+    }
+
+    canvas.addEventListener("mousedown", (e) => {
+      const m = getMousePos(e);
+
+      showPreview = true;
+
+      if (spaceDown) {
+        isPanning = true;
+        panStart = m;
+        offsetStart = { ...offset };
+        return;
+      }
+
+      const spacing = Number(spacingEl.value);
+      let world = screenToWorld(m);
+      // Fri plassering: legg brønnen der du klikker (ingen snap)
+
+      wells.push(world);
+      draw();
+    });
+
+    canvas.addEventListener("mousemove", (e) => {
+        const m = getMousePos(e);
+
+        // oppdater preview-posisjon (meter)
+        mouseWorld = screenToWorld(m);
+
+        if (isPanning) {
+            offset.x = offsetStart.x + (m.x - panStart.x);
+            offset.y = offsetStart.y + (m.y - panStart.y);
+        }
+
+        draw();
+    });
+
+
+    window.addEventListener("mouseup", () => { isPanning = false; });
+
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const mouse = getMousePos(e);
+      const before = screenToWorld(mouse);
+
+      const delta = Math.sign(e.deltaY);
+      const factor = delta > 0 ? 0.9 : 1.1;
+
+      pxPerMeter = Math.max(2, Math.min(80, pxPerMeter * factor));
+      scaleEl.value = String(Math.round(pxPerMeter));
+
+      const after = screenToWorld(mouse);
+      offset.x += (after.x - before.x) * pxPerMeter;
+      offset.y += (after.y - before.y) * pxPerMeter;
+      draw();
+    }, { passive: false });
+
+    window.addEventListener("keydown", (e) => {
+        if (e.code === "Space") spaceDown = true;
+
+        if (e.code === "Escape") {
+            showPreview = !showPreview;
+            draw();
+        }
+    });
+
+    window.addEventListener("keyup", (e) => { if (e.code === "Space") spaceDown = false; });
+
+    spacingEl.addEventListener("input", draw);
+    scaleEl.addEventListener("input", () => { pxPerMeter = Number(scaleEl.value); draw(); });
+
+    undoBtn.addEventListener("click", () => { wells.pop(); draw(); });
+    clearBtn.addEventListener("click", () => { wells = []; draw(); });
+
+    exportBtn.addEventListener("click", () => {
+      const payload = {
+        version: 1,
+        spacing_m: Number(spacingEl.value),
+        px_per_meter: pxPerMeter,
+        wells_m: wells
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "bronnpark.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    importInput.addEventListener("change", async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      if (!obj?.wells_m || !Array.isArray(obj.wells_m)) {
+        alert("Ugyldig JSON: mangler wells_m");
+        return;
+      }
+      wells = obj.wells_m.map(p => ({ x: Number(p.x), y: Number(p.y) }));
+      if (obj.spacing_m) spacingEl.value = String(obj.spacing_m);
+      if (obj.px_per_meter) {
+        pxPerMeter = Number(obj.px_per_meter);
+        scaleEl.value = String(Math.round(pxPerMeter));
+      }
+      draw();
+    });
+
+    addCoordBtn.addEventListener("click", addWellFromInputs);
+
+    function onCoordKey(e) {
+        if (e.key === "Enter") addWellFromInputs();
+    }
+    xCoordEl.addEventListener("keydown", onCoordKey);
+    yCoordEl.addEventListener("keydown", onCoordKey);
+
+    draw();
+  </script>
+</body>
+</html>
