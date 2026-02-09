@@ -1,4 +1,4 @@
-Dette programmet lar deg tenge inn brønner til en brønnpark og avgir samtidig gjennomsnittsavstanden mellom brønnene. 
+Dette programmet lar deg tegne inn brønner til en brønnpark og avgir samtidig gjennomsnittsavstanden mellom brønnene. 
 
 Koden er utviklet ved hjelp av KI.
 
