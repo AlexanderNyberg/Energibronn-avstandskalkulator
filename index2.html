@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="no">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Energibrønnkalkulator – Brønnpark på kart (UTM meter)</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+
+  <style>
+    :root{
+      --bg:#0b1020; --panel:#121a33; --text:#e7ecff; --muted:#a9b4e6;
+      --border:rgba(255,255,255,.12); --danger:#ff6b6b;
+    }
+    *{box-sizing:border-box;}
+    html,body{height:100%;}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+      background: radial-gradient(1000px 600px at 20% 0%, #18214a, var(--bg));
+      color:var(--text);
+      overflow:hidden;
+    }
+    .topbar{
+      display:flex; gap:18px; align-items:center; justify-content:space-between;
+      padding:14px 16px; border-bottom:1px solid var(--border);
+      background: rgba(10, 14, 30, 0.7); backdrop-filter: blur(8px);
+    }
+    .title h1{margin:0;font-size:18px;}
+    .title p{margin:2px 0 0;font-size:12px;color:var(--muted);}
+    .controls{
+      display:flex; gap:10px; align-items:end; flex-wrap:wrap;
+    }
+    label{
+      display:grid; gap:6px; font-size:12px; color:var(--muted);
+    }
+    input, select{
+      padding:8px 10px; border-radius:10px; border:1px solid var(--border);
+      background: var(--panel); color: var(--text); outline:none;
+      min-width: 140px;
+    }
+    button, .filebtn{
+      padding:9px 12px; border-radius:12px; border:1px solid var(--border);
+      background: var(--panel); color: var(--text); cursor:pointer; font-weight:600;
+    }
+    button:hover, .filebtn:hover{border-color:rgba(255,255,255,.25);}
+    button.danger{border-color:rgba(255,107,107,.5);}
+    button.danger:hover{border-color:var(--danger);}
+    .workspace{
+      height: calc(100% - 74px);
+      display:grid;
+      grid-template-rows: auto 1fr;
+      gap:10px;
+      padding:14px;
+    }
+    .hint{
+      display:flex; justify-content:space-between; gap:10px;
+      color:var(--muted); font-size:12px; align-items:center;
+    }
+    #map{
+      width:100%;
+      height:100%;
+      border-radius:16px;
+      border:1px solid var(--border);
+      overflow:hidden;
+    }
+    .pill{
+      padding:6px 10px; border:1px solid var(--border);
+      border-radius:999px; background: rgba(18,26,51,0.7);
+      color: var(--muted);
+    }
+    .leaflet-container{ background:#0a0f22; }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="title">
+    <h1>Brønnpark på kart</h1>
+    <p>Klikk i kartet → UTM (meter). ESC skjuler/viser preview.</p>
+  </div>
+
+  <div class="controls">
+    <label>
+      Gridavstand (m)
+      <input id="gridSpacing" type="number" min="1" step="0.5" value="15" />
+    </label>
+
+    <label>
+      UTM-sone (input)
+      <select id="utmZone">
+        <option value="32">32 (vest &lt; 12°Ø)</option>
+        <option value="33" selected>33 (øst ≥ 12°Ø)</option>
+      </select>
+    </label>
+
+    <label>
+      Easting E (m)
+      <input id="eCoord" type="number" step="0.01" placeholder="f.eks. 597000" />
+    </label>
+
+    <label>
+      Northing N (m)
+      <input id="nCoord" type="number" step="0.01" placeholder="f.eks. 6645000" />
+    </label>
+
+    <button id="addEN">Legg til (E,N)</button>
+    <button id="undo">Angre</button>
+    <button id="clear" class="danger">Slett alt</button>
+
+    <button id="export">Eksporter JSON</button>
+    <label class="filebtn">
+      Importer JSON
+      <input id="import" type="file" accept="application/json" hidden />
+    </label>
+  </div>
+</header>
+
+<main class="workspace">
+  <div class="hint">
+    <div class="pill">
+      Bruk: Klikk for brønn · Flytt mus for preview/trail · ESC = skjul/vis preview · Zoom/pan i kartet som vanlig
+    </div>
+    <div id="status" class="pill"></div>
+  </div>
+  <div id="map"></div>
+</main>
+
+<!-- Proj4 -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.19.10/proj4.js"></script>
+<!-- Leaflet -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+  // --- EPSG defs (UTM i meter) ---
+  proj4.defs("EPSG:25832", "+proj=utm +zone=32 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs");
+  proj4.defs("EPSG:25833", "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs +type=crs");
+
+  const map = L.map("map", { zoomControl: true }).setView([59.9139, 10.7522], 12); // Oslo default
+
+  // OpenStreetMap tiles
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 20,
+    attribution: "© OpenStreetMap"
+  }).addTo(map);
+
+  // UI refs
+  const gridSpacingEl = document.getElementById("gridSpacing");
+  const utmZoneEl = document.getElementById("utmZone");
+  const eCoordEl = document.getElementById("eCoord");
+  const nCoordEl = document.getElementById("nCoord");
+  const addENBtn = document.getElementById("addEN");
+
+  const undoBtn = document.getElementById("undo");
+  const clearBtn = document.getElementById("clear");
+  const exportBtn = document.getElementById("export");
+  const importInput = document.getElementById("import");
+  const statusEl = document.getElementById("status");
+
+  // Data model: store BOTH latlng (for map) and UTM (for your "meter only" world)
+  // well = { lat, lng, zone, E, N, marker }
+  let wells = [];
+
+  // Preview/trail state
+  let showPreview = true;     // ESC toggles
+  let lastMouseLatLng = null; // {lat,lng}
+  let previewMarker = null;
+  let previewLine = null;
+  let previewTooltip = null;
+
+  // --- Helpers ---
+  function autoZoneFromLng(lng) {
+    // Simple Norway rule of thumb: boundary 12°E between UTM32 and UTM33
+    return (lng < 12) ? 32 : 33;
+  }
+
+  function latLngToUTM(lat, lng) {
+    const zone = autoZoneFromLng(lng);
+    const epsg = (zone === 32) ? "EPSG:25832" : "EPSG:25833";
+    const [E, N] = proj4("EPSG:4326", epsg, [lng, lat]); // proj4 uses [x=lng, y=lat]
+    return { zone, E, N };
+  }
+
+  function utmToLatLng(zone, E, N) {
+    const epsg = (Number(zone) === 32) ? "EPSG:25832" : "EPSG:25833";
+    const [lng, lat] = proj4(epsg, "EPSG:4326", [E, N]);
+    return { lat, lng };
+  }
+
+  function distMetersLatLng(a, b) {
+    return map.distance(L.latLng(a.lat, a.lng), L.latLng(b.lat, b.lng));
+  }
+
+  function avgAllPairDistances(points) {
+    const n = points.length;
+    if (n < 2) return null;
+    let sum = 0, count = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        sum += distMetersLatLng(points[i], points[j]);
+        count++;
+      }
+    }
+    return sum / count;
+  }
+
+  function avgNearestNeighborDistance(points) {
+    const n = points.length;
+    if (n < 2) return null;
+    let sumNearest = 0;
+    for (let i = 0; i < n; i++) {
+      let best = Infinity;
+      for (let j = 0; j < n; j++) {
+        if (i === j) continue;
+        const d = distMetersLatLng(points[i], points[j]);
+        if (d < best) best = d;
+      }
+      sumNearest += best;
+    }
+    return sumNearest / n;
+  }
+
+  function updateStatus() {
+    const avgPairs = avgAllPairDistances(wells);
+    const avgNN = avgNearestNeighborDistance(wells);
+
+    const avgPairsTxt = avgPairs === null ? "-" : `${avgPairs.toFixed(2)} m`;
+    const avgNNTxt = avgNN === null ? "-" : `${avgNN.toFixed(2)} m`;
+
+    statusEl.textContent =
+      `Brønner: ${wells.length} | Snitt (alle par): ${avgPairsTxt} | ` +
+      `Snitt (nærmeste nabo): ${avgNNTxt} | Preview: ${showPreview ? "på" : "av"}`;
+  }
+
+  function makeWellMarker(well, index) {
+    const m = L.circleMarker([well.lat, well.lng], {
+      radius: 6,
+      weight: 2,
+      opacity: 1,
+      fillOpacity: 0.9
+    }).addTo(map);
+
+    const label = `#${index + 1} | UTM${well.zone} E=${well.E.toFixed(2)} N=${well.N.toFixed(2)}`;
+    m.bindPopup(label);
+
+    return m;
+  }
+
+  function refreshMarkers() {
+    // remove all markers and recreate (simple + safe for now)
+    for (const w of wells) {
+      if (w.marker) map.removeLayer(w.marker);
+    }
+    wells = wells.map((w, i) => {
+      const marker = makeWellMarker(w, i);
+      return { ...w, marker };
+    });
+    updateStatus();
+  }
+
+  function addWellAtLatLng(lat, lng) {
+    // Clicking again should re-enable preview
+    showPreview = true;
+
+    // Convert to UTM meters (auto zone)
+    const { zone, E, N } = latLngToUTM(lat, lng);
+
+    const well = { lat, lng, zone, E, N, marker: null };
+    wells.push(well);
+    refreshMarkers();
+  }
+
+  function addWellFromENInputs() {
+    const zone = Number(utmZoneEl.value);
+    const E = Number(eCoordEl.value);
+    const N = Number(nCoordEl.value);
+
+    if (!Number.isFinite(E) || !Number.isFinite(N)) {
+      alert("Skriv inn gyldige tall for E og N (meter).");
+      return;
+    }
+
+    const { lat, lng } = utmToLatLng(zone, E, N);
+
+    // Enable preview again
+    showPreview = true;
+
+    const well = { lat, lng, zone, E, N, marker: null };
+    wells.push(well);
+
+    // clear inputs
+    eCoordEl.value = "";
+    nCoordEl.value = "";
+
+    refreshMarkers();
+    map.panTo([lat, lng]);
+  }
+
+  // --- Preview & trail ---
+  function clearPreviewLayers() {
+    if (previewMarker) { map.removeLayer(previewMarker); previewMarker = null; }
+    if (previewLine) { map.removeLayer(previewLine); previewLine = null; }
+    if (previewTooltip) { map.removeLayer(previewTooltip); previewTooltip = null; }
+  }
+
+  function drawPreview(latlng) {
+    if (!showPreview) { clearPreviewLayers(); return; }
+    if (!latlng) return;
+
+    // Preview marker
+    if (!previewMarker) {
+      previewMarker = L.circleMarker(latlng, {
+        radius: 7,
+        weight: 2,
+        opacity: 0.9,
+        fillOpacity: 0
+      }).addTo(map);
+    } else {
+      previewMarker.setLatLng(latlng);
+    }
+
+    // Trail from last well to preview
+    if (wells.length > 0) {
+      const last = wells[wells.length - 1];
+      const a = L.latLng(last.lat, last.lng);
+      const b = L.latLng(latlng.lat, latlng.lng);
+
+      if (!previewLine) {
+        previewLine = L.polyline([a, b], { weight: 2, opacity: 0.8, dashArray: "6 6" }).addTo(map);
+      } else {
+        previewLine.setLatLngs([a, b]);
+      }
+
+      const d = map.distance(a, b);
+      const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2);
+
+      const { zone, E, N } = latLngToUTM(latlng.lat, latlng.lng);
+      // keep the dropdown loosely helpful
+      utmZoneEl.value = String(zone);
+
+      const html = `
+        <div style="font:12px system-ui; color:#e7ecff; background:rgba(18,26,51,0.85);
+                    border:1px solid rgba(255,255,255,.15); padding:6px 8px; border-radius:10px;">
+          <div><b>${d.toFixed(2)} m</b> fra siste brønn</div>
+          <div style="opacity:.85">UTM${zone} E=${E.toFixed(2)} N=${N.toFixed(2)}</div>
+        </div>
+      `;
+
+      if (!previewTooltip) {
+        previewTooltip = L.marker(mid, {
+          interactive: false,
+          icon: L.divIcon({ className: "", html, iconSize: [1,1] })
+        }).addTo(map);
+      } else {
+        previewTooltip.setLatLng(mid);
+        previewTooltip.setIcon(L.divIcon({ className: "", html, iconSize: [1,1] }));
+      }
+    } else {
+      // No last well: still show UTM at cursor via tooltip near cursor
+      const { zone, E, N } = latLngToUTM(latlng.lat, latlng.lng);
+      utmZoneEl.value = String(zone);
+
+      const html = `
+        <div style="font:12px system-ui; color:#e7ecff; background:rgba(18,26,51,0.85);
+                    border:1px solid rgba(255,255,255,.15); padding:6px 8px; border-radius:10px;">
+          <div><b>UTM${zone}</b> E=${E.toFixed(2)}</div>
+          <div>N=${N.toFixed(2)}</div>
+        </div>
+      `;
+      if (!previewTooltip) {
+        previewTooltip = L.marker(latlng, {
+          interactive: false,
+          icon: L.divIcon({ className: "", html, iconSize: [1,1] })
+        }).addTo(map);
+      } else {
+        previewTooltip.setLatLng(latlng);
+        previewTooltip.setIcon(L.divIcon({ className: "", html, iconSize: [1,1] }));
+      }
+      if (previewLine) { map.removeLayer(previewLine); previewLine = null; }
+    }
+  }
+
+  // Click to add well
+  map.on("click", (e) => {
+    addWellAtLatLng(e.latlng.lat, e.latlng.lng);
+  });
+
+  // Mouse move for preview/trail
+  map.on("mousemove", (e) => {
+    lastMouseLatLng = e.latlng;
+    drawPreview(e.latlng);
+  });
+
+  // ESC toggle preview
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Escape") {
+      showPreview = !showPreview;
+      if (!showPreview) clearPreviewLayers();
+      else if (lastMouseLatLng) drawPreview(lastMouseLatLng);
+      updateStatus();
+    }
+  });
+
+  // Add from inputs
+  addENBtn.addEventListener("click", addWellFromENInputs);
+  function onENKey(e){ if (e.key === "Enter") addWellFromENInputs(); }
+  eCoordEl.addEventListener("keydown", onENKey);
+  nCoordEl.addEventListener("keydown", onENKey);
+
+  // Undo / clear
+  undoBtn.addEventListener("click", () => {
+    const w = wells.pop();
+    if (w?.marker) map.removeLayer(w.marker);
+    refreshMarkers();
+  });
+
+  clearBtn.addEventListener("click", () => {
+    for (const w of wells) if (w.marker) map.removeLayer(w.marker);
+    wells = [];
+    clearPreviewLayers();
+    updateStatus();
+  });
+
+  // Export / Import
+  exportBtn.addEventListener("click", () => {
+    const payload = {
+      version: 1,
+      wells: wells.map(w => ({
+        zone: w.zone,
+        E: w.E,
+        N: w.N
+      }))
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "bronnpark_utm.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  importInput.addEventListener("change", async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    const obj = JSON.parse(text);
+
+    if (!obj?.wells || !Array.isArray(obj.wells)) {
+      alert("Ugyldig JSON: mangler wells[]");
+      return;
+    }
+
+    // clear existing
+    for (const w of wells) if (w.marker) map.removeLayer(w.marker);
+    wells = [];
+
+    for (const p of obj.wells) {
+      const zone = Number(p.zone);
+      const E = Number(p.E);
+      const N = Number(p.N);
+      if (!Number.isFinite(zone) || !Number.isFinite(E) || !Number.isFinite(N)) continue;
+      const { lat, lng } = utmToLatLng(zone, E, N);
+      wells.push({ lat, lng, zone, E, N, marker: null });
+    }
+
+    refreshMarkers();
+    if (wells.length > 0) map.fitBounds(L.latLngBounds(wells.map(w => [w.lat, w.lng])).pad(0.2));
+  });
+
+  // Initial status
+  updateStatus();
+</script>
+
+</body>
+</html>
